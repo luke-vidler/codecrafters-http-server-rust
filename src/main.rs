@@ -11,6 +11,8 @@ fn main() {
         match stream {
             Ok(_stream) => {
                 println!("accepted new connection");
+                let response_code = "HTTP/1.1 200 OK\r\n\r\n";
+                _stream.write(response_code.as_bytes()).unwrap();
             }
             Err(e) => {
                 println!("error: {}", e);
