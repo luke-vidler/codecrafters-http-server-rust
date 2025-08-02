@@ -21,16 +21,33 @@ fn main() {
 
 fn handle_client(mut stream: TcpStream) {
     let reader = BufReader::new(&stream);
-    let request = reader.lines().next().unwrap().unwrap();
-
-    let status_line = match &request[..] {
-        "GET / HTTP/1.1" => "HTTP/1.1 200 OK",
-        _ => "HTTP/1.1 404 Not Found",
+    let request_line = match reader.lines().next() {
+        Some(Ok(line)) => line,
+        _ => return, // Invalid or empty request
     };
 
-    let response = format!("{status_line}\r\n\r\n");
-    match stream.write_all(response.as_bytes()) {
-        Ok(_) => (),
-        Err(e) => println!("could not send response: {:?}", e),
-    };
+    let parts: Vec<&str> = request_line.split_whitespace().collect();
+    if parts.len() < 2 {
+        return;
+    }
+
+    let method = parts[0];
+    let path = parts[1];
+
+    if method == "GET" && path.starts_with("/echo/") {
+        let echo_str = &path[6..]; // Remove "/echo/"
+        let body = echo_str;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let _ = stream.write_all(response.as_bytes());
+    } else if method == "GET" && path == "/" {
+        let response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+        let _ = stream.write_all(response.as_bytes());
+    } else {
+        let response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+        let _ = stream.write_all(response.as_bytes());
+    }
 }
