@@ -52,6 +52,7 @@ fn handle_client(mut stream: TcpStream, directory: &str) {
     let method = parts[0];
     let path = parts[1];
 
+    let mut content_length = 0;
     let mut user_agent: Option<String> = None;
 
     for line_result in reader.by_ref().lines() {
@@ -66,6 +67,12 @@ fn handle_client(mut stream: TcpStream, directory: &str) {
 
         if let Some(value) = line.strip_prefix("User-Agent: ") {
             user_agent = Some(value.to_string());
+        }
+
+        if let Some(value) = line.strip_prefix("Content-Length: ") {
+            if let Ok(len) = value.trim().parse::<usize>() {
+                content_length = len;
+            }
         }
     }
 
@@ -98,26 +105,48 @@ fn handle_client(mut stream: TcpStream, directory: &str) {
     }
 
     // Handle /files/{filename}
-    if method == "GET" && path.starts_with("/files/") {
+    if path.starts_with("/files/") {
         let filename = &path["/files/".len()..];
         let mut filepath = PathBuf::from(directory);
         filepath.push(filename);
 
-        match fs::read(&filepath) {
-            Ok(contents) => {
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n",
-                    contents.len()
-                );
-                let _ = stream.write_all(response.as_bytes());
-                let _ = stream.write_all(&contents);
+        if method == "GET" {
+            match fs::read(&filepath) {
+                Ok(contents) => {
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n",
+                        contents.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    let _ = stream.write_all(&contents);
+                }
+                Err(_) => {
+                    let response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+                    let _ = stream.write_all(response.as_bytes());
+                }
             }
-            Err(_) => {
-                let response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
-                let _ = stream.write_all(response.as_bytes());
-            }
+            return;
         }
-        return;
+
+        if method == "POST" {
+            let mut body = vec![0u8; content_length];
+            if let Err(_) = reader.read_exact(&mut body) {
+                return;
+            }
+
+            match fs::write(&filepath, &body) {
+                Ok(_) => {
+                    let response = "HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n";
+                    let _ = stream.write_all(response.as_bytes());
+                }
+                Err(_) => {
+                    let response =
+                        "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n";
+                    let _ = stream.write_all(response.as_bytes());
+                }
+            }
+            return;
+        }
     }
 
     // Handle GET /
