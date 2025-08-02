@@ -1,4 +1,7 @@
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use std::{
+    collections::HashMap,
     env, fs,
     io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
@@ -37,8 +40,6 @@ fn main() {
 }
 
 fn handle_client(mut stream: TcpStream, directory: &str) {
-    use std::collections::HashMap;
-
     let mut reader = BufReader::new(&stream);
     let mut request_line = String::new();
 
@@ -68,36 +69,17 @@ fn handle_client(mut stream: TcpStream, directory: &str) {
         }
 
         if let Some((key, value)) = line.split_once(":") {
-            headers.insert(key.trim().to_ascii_lowercase(), value.trim().to_string());
-        }
+            let key = key.trim().to_ascii_lowercase();
+            let value = value.trim().to_string();
 
-        if let Some(value) = line.strip_prefix("Content-Length: ") {
-            if let Ok(len) = value.trim().parse::<usize>() {
-                content_length = len;
+            if key == "content-length" {
+                if let Ok(len) = value.parse::<usize>() {
+                    content_length = len;
+                }
             }
+
+            headers.insert(key, value);
         }
-    }
-
-    // Handle /echo/{str}
-    if method == "GET" && path.starts_with("/echo/") {
-        let echo_str = &path[6..];
-
-        let mut response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n");
-
-        if let Some(enc) = headers.get("accept-encoding") {
-            if enc.split(',').any(|e| e.trim() == "gzip") {
-                response.push_str("Content-Encoding: gzip\r\n");
-            }
-        }
-
-        response.push_str(&format!(
-            "Content-Length: {}\r\n\r\n{}",
-            echo_str.len(),
-            echo_str
-        ));
-
-        let _ = stream.write_all(response.as_bytes());
-        return;
     }
 
     // Handle /user-agent
@@ -116,52 +98,89 @@ fn handle_client(mut stream: TcpStream, directory: &str) {
         return;
     }
 
-    // Handle /files/{filename}
+    // Handle /echo/{str} with optional gzip
+    if method == "GET" && path.starts_with("/echo/") {
+        let echo_str = &path[6..];
+        let accept_encoding = headers.get("accept-encoding");
+
+        let client_accepts_gzip = accept_encoding
+            .map(|v| v.split(',').any(|enc| enc.trim() == "gzip"))
+            .unwrap_or(false);
+
+        let (body, content_encoding_header) = if client_accepts_gzip {
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            if encoder.write_all(echo_str.as_bytes()).is_err() {
+                return;
+            }
+            let compressed_body = encoder.finish().unwrap_or_default();
+            (compressed_body, Some("Content-Encoding: gzip\r\n"))
+        } else {
+            (echo_str.as_bytes().to_vec(), None)
+        };
+
+        let mut response = String::from("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n");
+        if let Some(enc_header) = content_encoding_header {
+            response.push_str(enc_header);
+        }
+        response.push_str(&format!("Content-Length: {}\r\n\r\n", body.len()));
+
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.write_all(&body);
+        return;
+    }
+
+    // Handle /files/{filename} GET and POST
     if path.starts_with("/files/") {
         let filename = &path["/files/".len()..];
         let mut filepath = PathBuf::from(directory);
         filepath.push(filename);
 
-        if method == "GET" {
-            match fs::read(&filepath) {
-                Ok(contents) => {
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n",
-                        contents.len()
-                    );
-                    let _ = stream.write_all(response.as_bytes());
-                    let _ = stream.write_all(&contents);
+        match method {
+            "GET" => {
+                match fs::read(&filepath) {
+                    Ok(contents) => {
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n",
+                            contents.len()
+                        );
+                        let _ = stream.write_all(response.as_bytes());
+                        let _ = stream.write_all(&contents);
+                    }
+                    Err(_) => {
+                        let response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+                        let _ = stream.write_all(response.as_bytes());
+                    }
                 }
-                Err(_) => {
-                    let response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
-                    let _ = stream.write_all(response.as_bytes());
-                }
-            }
-            return;
-        }
-
-        if method == "POST" {
-            let mut body = vec![0u8; content_length];
-            if reader.read_exact(&mut body).is_err() {
                 return;
             }
 
-            match fs::write(&filepath, &body) {
-                Ok(_) => {
-                    let response = "HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n";
+            "POST" => {
+                let mut body = vec![0; content_length];
+                if reader.read_exact(&mut body).is_err() {
+                    let response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
                     let _ = stream.write_all(response.as_bytes());
+                    return;
                 }
-                Err(_) => {
-                    let response =
-                        "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n";
-                    let _ = stream.write_all(response.as_bytes());
+
+                match fs::write(&filepath, &body) {
+                    Ok(_) => {
+                        let response = "HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n";
+                        let _ = stream.write_all(response.as_bytes());
+                    }
+                    Err(_) => {
+                        let response =
+                            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n";
+                        let _ = stream.write_all(response.as_bytes());
+                    }
                 }
+                return;
             }
-            return;
+
+            _ => {}
         }
     }
 
-    // Handle GET /
+    // Default handler for GET /
     if method == "GET" && path == "/" {
         let response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
         let _ = stream.write_all(response.as_bytes());
