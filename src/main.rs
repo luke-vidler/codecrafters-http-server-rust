@@ -58,6 +58,7 @@ fn handle_client(mut stream: TcpStream, directory: &str) {
 
         let mut headers = HashMap::new();
         let mut content_length = 0;
+        let mut should_close = false;
 
         for line_result in reader.by_ref().lines() {
             let line = match line_result {
@@ -79,9 +80,20 @@ fn handle_client(mut stream: TcpStream, directory: &str) {
                     }
                 }
 
+                if key == "connection" && value.to_ascii_lowercase() == "close" {
+                    should_close = true;
+                }
+
                 headers.insert(key, value);
             }
         }
+
+        // Connection header for the response
+        let connection_header = if should_close {
+            "Connection: close\r\n"
+        } else {
+            ""
+        };
 
         // Handle GET /echo/{str}
         if method == "GET" && path.starts_with("/echo/") {
@@ -107,10 +119,15 @@ fn handle_client(mut stream: TcpStream, directory: &str) {
             if let Some(enc_header) = content_encoding_header {
                 response.push_str(enc_header);
             }
+            response.push_str(connection_header);
             response.push_str(&format!("Content-Length: {}\r\n\r\n", body.len()));
 
             let _ = stream.write_all(response.as_bytes());
             let _ = stream.write_all(&body);
+
+            if should_close {
+                break;
+            }
             continue;
         }
 
@@ -118,11 +135,16 @@ fn handle_client(mut stream: TcpStream, directory: &str) {
         if method == "GET" && path == "/user-agent" {
             let user_agent = headers.get("user-agent").cloned().unwrap_or_default();
             let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n{}Content-Length: {}\r\n\r\n{}",
+                connection_header,
                 user_agent.len(),
                 user_agent
             );
             let _ = stream.write_all(response.as_bytes());
+
+            if should_close {
+                break;
+            }
             continue;
         }
 
@@ -137,16 +159,24 @@ fn handle_client(mut stream: TcpStream, directory: &str) {
                     match fs::read(&filepath) {
                         Ok(contents) => {
                             let response = format!(
-                                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n",
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n{}Content-Length: {}\r\n\r\n",
+                                connection_header,
                                 contents.len()
                             );
                             let _ = stream.write_all(response.as_bytes());
                             let _ = stream.write_all(&contents);
                         }
                         Err(_) => {
-                            let response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+                            let response = format!(
+                                "HTTP/1.1 404 Not Found\r\n{}Content-Length: 0\r\n\r\n",
+                                connection_header
+                            );
                             let _ = stream.write_all(response.as_bytes());
                         }
+                    }
+
+                    if should_close {
+                        break;
                     }
                     continue;
                 }
@@ -154,21 +184,36 @@ fn handle_client(mut stream: TcpStream, directory: &str) {
                 "POST" => {
                     let mut body = vec![0; content_length];
                     if reader.read_exact(&mut body).is_err() {
-                        let response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+                        let response = format!(
+                            "HTTP/1.1 400 Bad Request\r\n{}Content-Length: 0\r\n\r\n",
+                            connection_header
+                        );
                         let _ = stream.write_all(response.as_bytes());
+                        if should_close {
+                            break;
+                        }
                         continue;
                     }
 
                     match fs::write(&filepath, &body) {
                         Ok(_) => {
-                            let response = "HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n";
+                            let response = format!(
+                                "HTTP/1.1 201 Created\r\n{}Content-Length: 0\r\n\r\n",
+                                connection_header
+                            );
                             let _ = stream.write_all(response.as_bytes());
                         }
                         Err(_) => {
-                            let response =
-                                "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n";
+                            let response = format!(
+                                "HTTP/1.1 500 Internal Server Error\r\n{}Content-Length: 0\r\n\r\n",
+                                connection_header
+                            );
                             let _ = stream.write_all(response.as_bytes());
                         }
+                    }
+
+                    if should_close {
+                        break;
                     }
                     continue;
                 }
@@ -179,13 +224,27 @@ fn handle_client(mut stream: TcpStream, directory: &str) {
 
         // Handle GET /
         if method == "GET" && path == "/" {
-            let response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n{}Content-Length: 0\r\n\r\n",
+                connection_header
+            );
             let _ = stream.write_all(response.as_bytes());
+
+            if should_close {
+                break;
+            }
             continue;
         }
 
         // Default 404 Not Found
-        let response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+        let response = format!(
+            "HTTP/1.1 404 Not Found\r\n{}Content-Length: 0\r\n\r\n",
+            connection_header
+        );
         let _ = stream.write_all(response.as_bytes());
+
+        if should_close {
+            break;
+        }
     }
 }
