@@ -10,8 +10,10 @@ fn main() {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                println!("Accepted new connection");
-                handle_client(stream);
+                // Move the stream into a new thread
+                std::thread::spawn(|| {
+                    handle_client(stream);
+                });
             }
             Err(e) => {
                 eprintln!("Connection failed: {}", e);
