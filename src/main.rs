@@ -37,6 +37,8 @@ fn main() {
 }
 
 fn handle_client(mut stream: TcpStream, directory: &str) {
+    use std::collections::HashMap;
+
     let mut reader = BufReader::new(&stream);
     let mut request_line = String::new();
 
@@ -52,8 +54,8 @@ fn handle_client(mut stream: TcpStream, directory: &str) {
     let method = parts[0];
     let path = parts[1];
 
+    let mut headers = HashMap::new();
     let mut content_length = 0;
-    let mut user_agent: Option<String> = None;
 
     for line_result in reader.by_ref().lines() {
         let line = match line_result {
@@ -65,8 +67,8 @@ fn handle_client(mut stream: TcpStream, directory: &str) {
             break;
         }
 
-        if let Some(value) = line.strip_prefix("User-Agent: ") {
-            user_agent = Some(value.to_string());
+        if let Some((key, value)) = line.split_once(":") {
+            headers.insert(key.trim().to_ascii_lowercase(), value.trim().to_string());
         }
 
         if let Some(value) = line.strip_prefix("Content-Length: ") {
@@ -79,18 +81,28 @@ fn handle_client(mut stream: TcpStream, directory: &str) {
     // Handle /echo/{str}
     if method == "GET" && path.starts_with("/echo/") {
         let echo_str = &path[6..];
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+
+        let mut response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n");
+
+        if let Some(enc) = headers.get("accept-encoding") {
+            if enc.split(',').any(|e| e.trim() == "gzip") {
+                response.push_str("Content-Encoding: gzip\r\n");
+            }
+        }
+
+        response.push_str(&format!(
+            "Content-Length: {}\r\n\r\n{}",
             echo_str.len(),
             echo_str
-        );
+        ));
+
         let _ = stream.write_all(response.as_bytes());
         return;
     }
 
     // Handle /user-agent
     if method == "GET" && path == "/user-agent" {
-        if let Some(ua) = user_agent {
+        if let Some(ua) = headers.get("user-agent") {
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
                 ua.len(),
@@ -130,7 +142,7 @@ fn handle_client(mut stream: TcpStream, directory: &str) {
 
         if method == "POST" {
             let mut body = vec![0u8; content_length];
-            if let Err(_) = reader.read_exact(&mut body) {
+            if reader.read_exact(&mut body).is_err() {
                 return;
             }
 
